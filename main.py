@@ -2134,7 +2134,7 @@ def generate_landing_page(link: dict, uid: str, addresses: list[str]) -> str:
         for line in external.split("\n"):
             line = line.strip()
             if line:
-                links_out.append(line)
+                configs.append(line)
     # Sub URL for QR
     sub_url = f"https://{get_domain()}/sub/{uid}"
     configs_json = json.dumps(configs)
