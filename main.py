@@ -4747,6 +4747,9 @@ async function createLink(){
     if(!r.ok)throw new Error();
     toast('Created');
     $m('nl').value='';$m('nv').value='';$m('nc').value='';$m('nd').value='';
+    $m('n_external_enabled').checked=false;
+    $m('n_external_config').value='';
+    $m('n_external_box').style.display='none';
     $m('mo-add').classList.remove('show');
     await loadLinks();await loadStats();
   }catch(e){toast('Error creating link',true)}
