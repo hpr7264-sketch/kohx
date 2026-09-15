@@ -2899,7 +2899,7 @@ def generate_clash_config(link: dict, uid: str, addresses: list[str]) -> str:
             f'    alpn:\n'
             f'      - http/1.1\n'            
             f'    network: ws\n'
-            f'    ws-path: /ws/{auth}/{uid}\n'
+            f'    ws-path: /ws/{auth}/{uid}?ed=2048\n'
             f'    ws-headers:\n'
             f'      Host: {domain}\n'
         )
