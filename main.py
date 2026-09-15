@@ -2896,10 +2896,8 @@ def generate_clash_config(link: dict, uid: str, addresses: list[str]) -> str:
             f'    tls: true\n'
             f'    servername: {domain}\n'
             f'    client-fingerprint: {fp}\n'
-            f'    alpn:\n'
-            f'      - http/1.1\n'            
             f'    network: ws\n'
-            f'    ws-path: /ws/{auth}/{uid}?ed=2048\n'
+            f'    ws-path: /ws/{auth}/{uid}\n'
             f'    ws-headers:\n'
             f'      Host: {domain}\n'
         )
