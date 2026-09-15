@@ -2128,7 +2128,10 @@ def generate_landing_page(link: dict, uid: str, addresses: list[str]) -> str:
     configs = links_for_all_variants(link, uid)
     for addr in addresses:
         configs.extend(links_for_all_variants(link, uid, address=addr))
-
+    
+    external = (link.get("external_config") or "").strip()
+    if external:
+        configs.append(external)
     # Sub URL for QR
     sub_url = f"https://{get_domain()}/sub/{uid}"
     configs_json = json.dumps(configs)
