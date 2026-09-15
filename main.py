@@ -2896,6 +2896,8 @@ def generate_clash_config(link: dict, uid: str, addresses: list[str]) -> str:
             f'    tls: true\n'
             f'    servername: {domain}\n'
             f'    client-fingerprint: {fp}\n'
+            f'    alpn:\n'
+            f'      - http/1.1\n'            
             f'    network: ws\n'
             f'    ws-path: /ws/{auth}/{uid}\n'
             f'    ws-headers:\n'
@@ -2957,7 +2959,7 @@ def generate_clash_config(link: dict, uid: str, addresses: list[str]) -> str:
         f"  - DOMAIN-KEYWORD,netflix,Proxy\n"
         f"  - GEOIP,IR,DIRECT\n"
         f"  - GEOSITE,cn,DIRECT\n"
-        f"  - MATCH,DIRECT\n"
+        f"  - MATCH,Proxy\n"
     )
 
 @app.get("/sub/{uid}")
