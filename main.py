@@ -2939,6 +2939,61 @@ def generate_clash_config(link: dict, uid: str, addresses: list[str]) -> str:
             proxies.append(_proxy_entry(auth, fp, name_i, addr))
             proxy_name_list.append(name_i)
 
+      # اضافه کردن کانفیگ‌های خارجی (vless://)
+    external = (link.get("external_config") or "").strip()
+    if external:
+        import urllib.parse as _up
+        for line in external.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("vless://"):
+                try:
+                    # parse vless://uuid@host:port?query#remark
+                    body = line[8:]
+                    if "#" in body:
+                        body, remark = body.split("#", 1)
+                        remark = _up.unquote(remark)
+                    else:
+                        remark = "External"
+                    if "?" in body:
+                        body, query = body.split("?", 1)
+                    else:
+                        query = ""
+                    if "@" in body:
+                        cred, addr = body.split("@", 1)
+                    else:
+                        cred, addr = "", body
+                    if ":" in addr:
+                        host, port = addr.rsplit(":", 1)
+                    else:
+                        host, port = addr, "443"
+                    params = dict(_up.parse_qsl(query))
+                    sni = params.get("sni", params.get("host", host))
+                    fp = params.get("fp", "chrome")
+                    ws_path = params.get("path", "/")
+                    host_hdr = params.get("host", host)
+                    ext_yaml = (
+                        f'  - name: "{remark}"\n'
+                        f'    type: vless\n'
+                        f'    server: {host}\n'
+                        f'    port: {port}\n'
+                        f'    uuid: {cred}\n'
+                        f'    udp: true\n'
+                        f'    tls: true\n'
+                        f'    skip-cert-verify: false\n'
+                        f'    servername: {sni}\n'
+                        f'    client-fingerprint: {fp}\n'
+                        f'    network: ws\n'
+                        f'    ws-opts:\n'
+                        f'      path: {ws_path}\n'
+                        f'      headers:\n'
+                        f'        Host: {host_hdr}\n'
+                    )
+                    proxies.append(ext_yaml)
+                    proxy_name_list.append(remark)
+                except Exception as e:
+                    logger.warning(f"Failed to parse external config for Clash: {e}")
     proxies_yaml = "\n".join(proxies)
     proxy_names = "\n".join(f'      - "{p}"' for p in proxy_name_list)
 
