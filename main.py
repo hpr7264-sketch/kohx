@@ -2133,7 +2133,7 @@ def generate_landing_page(link: dict, uid: str, addresses: list[str]) -> str:
     if external:
         for line in external.split("\n"):
             line = line.strip()
-            if line:
+            if line and (line.startswith("vless://") or line.startswith("trojan://")):
                 configs.append(line)
     # Sub URL for QR
     sub_url = f"https://{get_domain()}/sub/{uid}"
@@ -2831,8 +2831,8 @@ def generate_subscription_content(link: dict, uid: str, addresses: list[str]) ->
     if external:
         for line in external.split("\n"):
             line = line.strip()
-            if line:
-                configs.append(line)
+            if line and (line.startswith("vless://") or line.startswith("trojan://")):
+                links_out.append(line)
 
     return "\n".join(links_out)
 
@@ -4160,7 +4160,7 @@ body[dir="rtl"]{direction:rtl;text-align:right}
       </div>
       <div id="n_external_box" style="display:none">
         <label class="fl" data-en="External Config (vless:// or trojan://)" data-fa="کانفیگ خارجی (vless:// یا trojan://)">کانفیگ خارجی</label>
-        <textarea class="fi" id="n_external_config" rows="5" placeholder="vless://..." style="resize:vertical;font-family:monospace;font-size:11px"></textarea>
+        <textarea class="fi" id="n_external_config" rows="8" placeholder="vless://... (هر خط یکی)" style="resize:vertical;font-family:monospace;font-size:11px;width:100%;min-height:160px"></textarea>
       </div>
     </div>
     <div style="display:flex;gap:6px;margin-top:-4px;margin-bottom:10px">
@@ -4261,7 +4261,7 @@ body[dir="rtl"]{direction:rtl;text-align:right}
       </div>
       <div id="e_external_box" style="display:none">
         <label class="fl" data-en="External Config (vless:// or trojan://)" data-fa="کانفیگ خارجی (vless:// یا trojan://)">کانفیگ خارجی</label>
-        <textarea class="fi" id="e_external_config" rows="5" placeholder="vless://... (هر خط یکی)" style="resize:vertical;font-family:monospace;font-size:11px"></textarea>
+        <textarea class="fi" id="e_external_config" rows="8" placeholder="vless://... (هر خط یکی)" style="resize:vertical;font-family:monospace;font-size:11px;width:100%;min-height:160px"></textarea>
       </div>
     </div>
     <div class="fr">
