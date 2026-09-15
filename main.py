@@ -2884,8 +2884,6 @@ def generate_clash_config(link: dict, uid: str, addresses: list[str]) -> str:
     variants = sanitize_variants(link.get("variants"))
 
     def _proxy_entry(auth: str, fp: str, name: str, server: str, port: int = DEFAULT_PORT) -> str:
-        # نکته: این خروجی کلش فقط ترابرد WS رو پوشش می‌ده؛ برای لینک‌های XHTTP از
-        # همون لینک share (vless:// یا trojan://) استفاده کن.
         cred_line = f'    uuid: {uid}\n' if auth == "vless" else f'    password: {uid}\n'
         return (
             f'  - name: "{name}"\n'
@@ -2893,13 +2891,16 @@ def generate_clash_config(link: dict, uid: str, addresses: list[str]) -> str:
             f'    server: {server}\n'
             f'    port: {port}\n'
             f'{cred_line}'
+            f'    udp: true\n'
             f'    tls: true\n'
+            f'    skip-cert-verify: false\n'
             f'    servername: {domain}\n'
             f'    client-fingerprint: {fp}\n'
             f'    network: ws\n'
-            f'    ws-path: /ws/{auth}/{uid}\n'
-            f'    ws-headers:\n'
-            f'      Host: {domain}\n'
+            f'    ws-opts:\n'
+            f'      path: /ws/{auth}/{uid}\n'
+            f'      headers:\n'
+            f'        Host: {domain}\n'
         )
 
     # فقط auth هایی که فعالن و ترابردشون ws هست رو کلش می‌سازیم (محدودیت خودِ این export)
