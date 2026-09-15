@@ -625,6 +625,7 @@ def init_db():
         ("alpn", "ALTER TABLE links ADD COLUMN alpn TEXT DEFAULT ''"),
         ("port", "ALTER TABLE links ADD COLUMN port INTEGER DEFAULT 443"),
         ("variants_json", "ALTER TABLE links ADD COLUMN variants_json TEXT DEFAULT ''"),
+        ("external_config", "ALTER TABLE links ADD COLUMN external_config TEXT DEFAULT ''"),
     ):
         if col not in existing_cols:
             conn.execute(ddl)
@@ -701,13 +702,13 @@ async def save_db():
                     variants = sanitize_variants(link.get("variants"))
                     legacy_protocol, legacy_fp, legacy_alpn = variants_to_legacy(variants)
                     conn.execute("""
-                        INSERT OR REPLACE INTO links (uuid, label, limit_bytes, used_bytes, max_connections, created_at, active, expires_at, protocol, fingerprint, alpn, port, variants_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT OR REPLACE INTO links (uuid, label, limit_bytes, used_bytes, max_connections, created_at, active, expires_at, protocol, fingerprint, alpn, port, variants_json, external_config)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (uid, link["label"], link["limit_bytes"], link["used_bytes"],
                           link.get("max_connections", 0), link["created_at"],
                           1 if link.get("active", True) else 0, link.get("expires_at"),
                           legacy_protocol, legacy_fp, legacy_alpn, link.get("port", DEFAULT_PORT),
-                          json.dumps(variants)))
+                          json.dumps(variants), link.get("external_config", "")))
             # Save addresses
             async with CUSTOM_ADDRESSES_LOCK:
                 conn.execute("DELETE FROM custom_addresses")
@@ -754,6 +755,7 @@ def load_db():
                 "expires_at": row["expires_at"],
                 "variants": variants,
                 "port": row["port"] if row["port"] else DEFAULT_PORT,
+                "external_config": row["external_config"] if "external_config" in row.keys() else "",
             }
         # Load addresses
         CUSTOM_ADDRESSES.clear()
@@ -1848,6 +1850,8 @@ async def create_link(request: Request, _=Depends(require_auth)):
     port = DEFAULT_PORT
 
     uid = str(uuid.uuid4())
+    external_config = (body.get("external_config") or "").strip()
+
     async with LINKS_LOCK:
         LINKS[uid] = {
             "label": label,
@@ -1859,6 +1863,7 @@ async def create_link(request: Request, _=Depends(require_auth)):
             "expires_at": expires_at,
             "variants": variants,
             "port": port,
+            "external_config": external_config,
         }
     await save_db()
     return {
@@ -1887,6 +1892,7 @@ async def list_links(_=Depends(require_auth)):
             "variants": sanitize_variants(data.get("variants")),
             "port": data.get("port", DEFAULT_PORT),
             "current_connections": await count_connections_for_link(uid),
+            "external_config": data.get("external_config", ""),
             "vless_links": links_for_all_variants(data, uid),
         })
     result.sort(key=lambda x: x["created_at"], reverse=True)
@@ -1908,6 +1914,8 @@ async def toggle_link(uid: str, request: Request, _=Depends(require_auth)):
         if "reset_usage" in body and body["reset_usage"]:
             LINKS[uid]["used_bytes"] = 0
             notified_uids.discard(f"quota_{uid}")
+        if "external_config" in body:
+            LINKS[uid]["external_config"] = str(body.get("external_config") or "").strip()
         if "label" in body:
             LINKS[uid]["label"] = str(body["label"])[:60]
         if "max_connections" in body:
@@ -2813,8 +2821,11 @@ def generate_subscription_content(link: dict, uid: str, addresses: list[str]) ->
     for addr in addresses:
         links_out.extend(links_for_all_variants(link, uid, address=addr))
 
-    return "\n".join(links_out)
+    external = (link.get("external_config") or "").strip()
+    if external:
+        links_out.append(external)
 
+    return "\n".join(links_out)
 
 def generate_singbox_config(link: dict, uid: str, addresses: list[str]) -> str:
     """Hiddify's engine is sing-box, so give it sing-box's own native
@@ -4133,6 +4144,16 @@ body[dir="rtl"]{direction:rtl;text-align:right}
     <button class="mo-close" onclick="document.getElementById('mo-add').classList.remove('show')">✕</button>
     <div class="mo-title" data-en="ADD INBOUND" data-fa="افزودن اینباند">ADD INBOUND</div>
     <div class="fg"><label class="fl" data-en="Remark" data-fa="توضیح">Remark</label><input class="fi" id="nl" data-ph-en="e.g. User 1" data-ph-fa="مثلاً کاربر ۱" placeholder="e.g. User 1"></div>
+    <div class="fg" style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-top:4px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <input type="checkbox" id="n_external_enabled" style="width:16px;height:16px;accent-color:var(--gold)" onchange="toggleExternalBox('n')">
+        <label for="n_external_enabled" style="font-weight:700;cursor:pointer" data-en="Add External Config" data-fa="کانفیگ خارجی اضافه کن">کانفیگ خارجی اضافه کن</label>
+      </div>
+      <div id="n_external_box" style="display:none">
+        <label class="fl" data-en="External Config (vless:// or trojan://)" data-fa="کانفیگ خارجی (vless:// یا trojan://)">کانفیگ خارجی</label>
+        <textarea class="fi" id="n_external_config" rows="3" placeholder="vless://..." style="resize:vertical;font-family:monospace;font-size:11px"></textarea>
+      </div>
+    </div>
     <div style="display:flex;gap:6px;margin-top:-4px;margin-bottom:10px">
       <button type="button" onclick="addFlag('🇳🇱')" title="Netherlands" style="padding:4px 8px;background:var(--surface3);border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center" onmouseover="this.style.background='var(--gold-dim)'" onmouseout="this.style.background='var(--surface3)'"><img src="https://flagcdn.com/w40/nl.png" alt="NL" style="width:28px;height:auto;border-radius:3px;display:block"></button>
       <button type="button" onclick="addFlag('🇺🇸')" title="USA" style="padding:4px 8px;background:var(--surface3);border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center" onmouseover="this.style.background='var(--gold-dim)'" onmouseout="this.style.background='var(--surface3)'"><img src="https://flagcdn.com/w40/us.png" alt="US" style="width:28px;height:auto;border-radius:3px;display:block"></button>
@@ -4224,6 +4245,16 @@ body[dir="rtl"]{direction:rtl;text-align:right}
     <div class="mo-title" id="et">EDIT INBOUND</div>
     <input type="hidden" id="eu">
     <div class="fg"><label class="fl" data-en="Name" data-fa="نام">Name</label><input class="fi" id="en2" readonly style="opacity:.5;cursor:not-allowed"></div>
+    <div class="fg" style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-top:4px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <input type="checkbox" id="e_external_enabled" style="width:16px;height:16px;accent-color:var(--gold)" onchange="toggleExternalBox('e')">
+        <label for="e_external_enabled" style="font-weight:700;cursor:pointer" data-en="Add External Config" data-fa="کانفیگ خارجی اضافه کن">کانفیگ خارجی اضافه کن</label>
+      </div>
+      <div id="e_external_box" style="display:none">
+        <label class="fl" data-en="External Config (vless:// or trojan://)" data-fa="کانفیگ خارجی (vless:// یا trojan://)">کانفیگ خارجی</label>
+        <textarea class="fi" id="e_external_config" rows="3" placeholder="vless://..." style="resize:vertical;font-family:monospace;font-size:11px"></textarea>
+      </div>
+    </div>
     <div class="fr">
       <div class="fg"><label class="fl" data-en="Traffic Limit" data-fa="محدودیت ترافیک">Traffic Limit</label><input class="fi" id="el" type="number" min="0" step=".1" placeholder="0 = ∞"></div>
       <div class="fg" style="max-width:100px"><label class="fl" data-en="Unit" data-fa="واحد">Unit</label><select class="fs" id="eu2"><option>GB</option></select></div>
@@ -4673,6 +4704,11 @@ function syncAlpnDefault(auth,transportId,alpnId){
   const key=auth+'-'+$m(transportId).value;
   $m(alpnId).value=ALPN_DEFAULTS[key]||'http/1.1';
 }
+    function toggleExternalBox(prefix) {{
+        const cb = document.getElementById(prefix + '_external_enabled');
+        const box = document.getElementById(prefix + '_external_box');
+        if(cb && box) box.style.display = cb.checked ? '' : 'none';
+    }}
 function toggleVariantBox(prefix,auth){
   $m(prefix+'_'+auth+'_box').style.display=$m(prefix+'_'+auth+'_enabled').checked?'':'none';
 }
@@ -4699,6 +4735,9 @@ async function createLink(){
   const v=parseFloat($m('nv').value)||0;
   const mc=parseInt($m('nc').value)||0;
   const days=parseInt($m('nd').value)||0;
+  const extEnabled=$m('n_external_enabled')?.checked;
+  const extConfig=extEnabled ? ($m('n_external_config')?.value||'').trim() : '';
+  if(extConfig && !/^(vless|trojan):\/\//.test(extConfig)){toast('کانفیگ خارجی نامعتبر است',true);return}
   const body=Object.assign({label,limit_value:v,limit_unit:'GB',max_connections:mc,days_valid:days},readVariantFields('n','vless'),readVariantFields('n','trojan'));
   try{
     const r=await fetch('/api/links',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -4731,7 +4770,10 @@ async function saveEdit(){
   const v=parseFloat($m('el').value)||0;
   const mc=parseInt($m('ec').value)||0;
   const days=parseInt($m('ed').value)||0;
-  const body=Object.assign({limit_value:v,limit_unit:'GB',max_connections:mc},readVariantFields('e','vless'),readVariantFields('e','trojan'));
+  const extEnabled=$m('e_external_enabled')?.checked;
+  const extConfig=extEnabled ? ($m('e_external_config')?.value||'').trim() : '';
+  if(extConfig && !/^(vless|trojan):\/\//.test(extConfig)){toast('کانفیگ خارجی نامعتبر است',true);return}
+  const body=Object.assign({limit_value:v,limit_unit:'GB',max_connections:mc,external_config:extConfig},readVariantFields('e','vless'),readVariantFields('e','trojan'));
   if(days>0)body.days_valid=days;
   try{
     const r=await fetch('/api/links/'+uid,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
