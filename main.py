@@ -2029,10 +2029,13 @@ async def create_link(request: Request, _=Depends(require_auth)):
         }
     await save_db()
     
-        # ⭐ پوش کردن کاربر جدید به همه نودها
+    # ⭐ پوش کردن کاربر جدید به همه نودها
+    # اسم خالص رو بدون پرچم بفرست
+    clean_label = re.sub(r'^[\U0001F1E6-\U0001F1FF]{2}\s+', '', label).strip()
+    
     user_data_for_nodes = {
         "uuid": uid,
-        "label": label,
+        "label": clean_label,
         "limit_bytes": limit_bytes,
         "used_bytes": 0,
         "expires_at": expires_at,
