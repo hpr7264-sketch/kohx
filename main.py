@@ -6540,7 +6540,56 @@ async def api_node_get_config(request: Request, uuid: str):
     
     # اولین کانفیگ رو برگردون
     return {"status": "ok", "config": configs[0]}   
+
+
+@app.post("/api/node/report-usage")
+async def api_node_report_usage(request: Request):
+    """دریافت گزارش مصرف از نودها.
     
+    هر نود هر ۳۰ ثانیه مصرف کاربراش رو به مستر گزارش می‌ده.
+    """
+    # چک توکن
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    body = await request.json()
+    reports = body.get("reports") or []  # لیست [{uuid, used_bytes}, ...]
+    
+    if not reports:
+        return {"status": "ok", "updated": 0}
+    
+    # ذخیره توی node_usage
+    # این نود، slot شماره‌ی خودش رو باید بفرسته
+    node_slot = int(body.get("node_slot") or 0)
+    if node_slot < 1 or node_slot > MAX_NODES:
+        raise HTTPException(status_code=400, detail="Invalid node_slot")
+    
+    conn = get_db()
+    try:
+        updated = 0
+        now = time.time()
+        for rep in reports:
+            uid = rep.get("uuid")
+            used = int(rep.get("used_bytes") or 0)
+            if not uid:
+                continue
+            # INSERT OR REPLACE (اگه بود آپدیت، اگه نبود بساز)
+            conn.execute("""
+                INSERT INTO node_usage (uuid, node_slot, used_bytes, last_report)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(uuid, node_slot) DO UPDATE SET
+                    used_bytes = excluded.used_bytes,
+                    last_report = excluded.last_report
+            """, (uid, node_slot, used, now))
+            updated += 1
+        conn.commit()
+        logger.info(f"[NODE] Received usage report from slot {node_slot}: {updated} users")
+        return {"status": "ok", "updated": updated}
+    finally:
+        conn.close()    
+        
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=CONFIG["port"])
     
