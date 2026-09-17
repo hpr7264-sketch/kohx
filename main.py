@@ -2295,7 +2295,7 @@ def _fmt_bytes(b: int) -> str:
     if b >= 1_048_576: return f"{b / 1_048_576:.1f}MB"
     return f"{b / 1024:.1f}KB"
 
-def generate_landing_page(link: dict, uid: str, addresses: list[str]) -> str:
+async def generate_landing_page(link: dict, uid: str, addresses: list[str]) -> str:
     used = link["used_bytes"]
     limit = link["limit_bytes"]
     expires_at_str = link.get("expires_at")
@@ -2328,7 +2328,19 @@ def generate_landing_page(link: dict, uid: str, addresses: list[str]) -> str:
     configs = links_for_all_variants(link, uid)
     for addr in addresses:
         configs.extend(links_for_all_variants(link, uid, address=addr))
-    
+        
+    # ⭐ کانفیگ‌های نودها (فقط online ها)
+    for slot in range(1, MAX_NODES + 1):
+        node = get_node_by_slot(slot)
+        if node and node.get("address") and node.get("status") == "online":
+            try:
+                from nodes import get_config_from_node
+                node_config = await get_config_from_node(slot, uid)
+                if node_config:
+                    configs.append(node_config)
+            except Exception as e:
+                logger.warning(f"[LANDING] Failed to get config from node slot {slot}: {e}")
+                
     external = (link.get("external_config") or "").strip()
     if external:
         for line in external.split("\n"):
@@ -3280,7 +3292,7 @@ async def subscription_endpoint(uid: str, request: Request):
     )
 
     if is_browser:
-        return HTMLResponse(content=generate_landing_page(link, uid, addresses))
+        return HTMLResponse(content=await generate_landing_page(link, uid, addresses))
 
     is_clash = ("hiddify" not in ua) and any(x in ua for x in ["clash", "stash", "verge", "clashx", "clashmeta", "cfw"])
 
@@ -3299,8 +3311,20 @@ async def subscription_endpoint(uid: str, request: Request):
         }
         return Response(content=clash_content, headers=headers)
 
+    # ⭐ کانفیگ مستر
     sub_content = generate_subscription_content(link, uid, addresses)
-
+    
+    # ⭐ کانفیگ‌های نودها (فقط online ها)
+    for slot in range(1, MAX_NODES + 1):
+        node = get_node_by_slot(slot)
+        if node and node.get("address") and node.get("status") == "online":
+            try:
+                from nodes import get_config_from_node
+                node_config = await get_config_from_node(slot, uid)
+                if node_config:
+                    sub_content += "\n" + node_config
+            except Exception as e:
+                logger.warning(f"[SUB] Failed to get config from node slot {slot}: {e}")
     headers = {
         "Content-Type": "text/plain; charset=utf-8",
         "profile-update-interval": "6",
@@ -6478,6 +6502,44 @@ async def api_node_disable_user(request: Request):
     
     logger.info(f"[NODE] Disabled user {uid[:8]} by master request")
     return {"status": "ok", "uuid": uid}
+ 
+
+@app.get("/api/node/get-config")
+async def api_node_get_config(request: Request, uuid: str):
+    """کانفیگ کاربر رو با پرچم و نام این پنل می‌سازه.
+    
+    این endpoint روی همه‌ی پنل‌ها (مستر و نود) فعاله.
+    مستر با فرستادن uuid، از نود می‌پرسه کانفیگ کاربر چیه.
+    """
+    # چک توکن
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # کاربر رو پیدا کن
+    async with LINKS_LOCK:
+        link = LINKS.get(uuid)
+        if link is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        link = dict(link)
+    
+    # چک فعال/منقضی
+    if not link.get("active", True):
+        raise HTTPException(status_code=403, detail="User inactive")
+    
+    expires_at = parse_expires_at(link.get("expires_at"))
+    if expires_at is not None and expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=403, detail="User expired")
+    
+    # کانفیگ‌ها رو بساز (با پرچم و نام این پنل)
+    configs = links_for_all_variants(link, uuid)
+    
+    if not configs:
+        raise HTTPException(status_code=404, detail="No configs found")
+    
+    # اولین کانفیگ رو برگردون
+    return {"status": "ok", "config": configs[0]}   
     
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=CONFIG["port"])
