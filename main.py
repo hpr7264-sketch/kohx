@@ -2028,6 +2028,20 @@ async def create_link(request: Request, _=Depends(require_auth)):
             "external_config": external_config,
         }
     await save_db()
+    
+        # ⭐ پوش کردن کاربر جدید به همه نودها
+    user_data_for_nodes = {
+        "uuid": uid,
+        "label": label,
+        "limit_bytes": limit_bytes,
+        "used_bytes": 0,
+        "expires_at": expires_at,
+        "max_connections": max_conn,
+        "variants": variants,
+        "port": port,
+    }
+    asyncio.create_task(push_user_to_all_nodes(user_data_for_nodes))
+    
     return {
         "uuid": uid, "label": label, "limit_bytes": limit_bytes, "used_bytes": 0,
         "max_connections": max_conn, "active": True, "created_at": LINKS[uid]["created_at"],
@@ -2100,6 +2114,23 @@ async def toggle_link(uid: str, request: Request, _=Depends(require_auth)):
             except (ValueError, TypeError):
                 pass
     await save_db()
+    
+    # ⭐ sync کردن تغییرات کاربر با نودها
+    async with LINKS_LOCK:
+        if uid in LINKS:
+            user_data = {
+                "uuid": uid,
+                "label": LINKS[uid]["label"],
+                "limit_bytes": LINKS[uid]["limit_bytes"],
+                "used_bytes": LINKS[uid]["used_bytes"],
+                "expires_at": LINKS[uid].get("expires_at"),
+                "max_connections": LINKS[uid].get("max_connections", 0),
+                "variants": LINKS[uid]["variants"],
+                "port": LINKS[uid].get("port", DEFAULT_PORT),
+                "active": LINKS[uid]["active"],
+            }
+            asyncio.create_task(sync_user_to_all_nodes(user_data))
+    
     return {"ok": True}
 
 @app.delete("/api/links/{uid}")
@@ -2108,6 +2139,10 @@ async def delete_link(uid: str, _=Depends(require_auth)):
         LINKS.pop(uid, None)
     await save_db()
     await close_connections_for_link(uid)
+    
+    # ⭐ حذف کاربر از همه نودها
+    asyncio.create_task(delete_user_from_all_nodes(uid))
+    
     return {"ok": True}
 
 @app.get("/api/addresses")
@@ -3656,6 +3691,9 @@ from nodes import (
     push_user_to_all_nodes,
     node_health_check_loop,
     DEFAULT_SLOTS,
+    delete_user_from_all_nodes,
+    sync_user_to_all_nodes,
+    reset_usage_on_all_nodes,
 )
 
 # ── HTML Panel (Gold/Neon Theme) ─────────────────────────────────────────
@@ -6225,6 +6263,7 @@ async def api_node_receive_user(request: Request):
     limit_bytes = int(body.get("limit_bytes") or 0)
     expires_at = body.get("expires_at")
     max_connections = int(body.get("max_connections") or 0)
+    active = bool(body.get("active", True))  
     
     async with LINKS_LOCK:
         if uid in LINKS:
@@ -6234,6 +6273,7 @@ async def api_node_receive_user(request: Request):
             LINKS[uid]["expires_at"] = expires_at
             LINKS[uid]["max_connections"] = max_connections
             LINKS[uid]["variants"] = variants
+            LINKS[uid]["active"] = active 
             logger.info(f"[NODE] Updated existing user '{label}' ({uid[:8]})")
         else:
             # ساخت جدید
@@ -6243,7 +6283,7 @@ async def api_node_receive_user(request: Request):
                 "used_bytes": 0,
                 "max_connections": max_connections,
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "active": True,
+                "active": active,
                 "expires_at": expires_at,
                 "variants": variants,
                 "port": DEFAULT_PORT,
@@ -6364,6 +6404,71 @@ async def api_list_countries(_=Depends(require_auth)):
             "flag": data["flag"],
         })
     return {"countries": countries}
+    
+@app.post("/api/node/delete-user")
+async def api_node_delete_user(request: Request):
+    """حذف کاربر از این نود (از طرف مستر)."""
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    body = await request.json()
+    uid = body.get("uuid")
+    if not uid:
+        raise HTTPException(status_code=400, detail="uuid is required")
+    
+    async with LINKS_LOCK:
+        LINKS.pop(uid, None)
+    await save_db()
+    await close_connections_for_link(uid)
+    
+    logger.info(f"[NODE] Deleted user {uid[:8]} by master request")
+    return {"status": "ok", "uuid": uid}
+
+@app.post("/api/node/reset-usage")
+async def api_node_reset_usage(request: Request):
+    """ریست مصرف کاربر روی این نود."""
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    body = await request.json()
+    uid = body.get("uuid")
+    if not uid:
+        raise HTTPException(status_code=400, detail="uuid is required")
+    
+    async with LINKS_LOCK:
+        if uid in LINKS:
+            LINKS[uid]["used_bytes"] = 0
+    await save_db()
+    
+    logger.info(f"[NODE] Reset usage for {uid[:8]} by master request")
+    return {"status": "ok", "uuid": uid}
+
+
+@app.post("/api/node/disable-user")
+async def api_node_disable_user(request: Request):
+    """غیرفعال کردن کاربر روی این نود."""
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    body = await request.json()
+    uid = body.get("uuid")
+    if not uid:
+        raise HTTPException(status_code=400, detail="uuid is required")
+    
+    async with LINKS_LOCK:
+        if uid in LINKS:
+            LINKS[uid]["active"] = False
+    await save_db()
+    await close_connections_for_link(uid)
+    
+    logger.info(f"[NODE] Disabled user {uid[:8]} by master request")
+    return {"status": "ok", "uuid": uid}
     
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=CONFIG["port"])
