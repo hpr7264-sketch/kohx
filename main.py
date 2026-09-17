@@ -6257,6 +6257,12 @@ async def api_node_receive_user(request: Request):
     
     if not uid or not label:
         raise HTTPException(status_code=400, detail="uuid and label are required")
+        
+        # ⭐ اسم خالص رو بدون پرچم جدا کن + پرچم این نود رو اضافه کن
+    import re as _re
+    clean_label = _re.sub(r'^[\U0001F1E6-\U0001F1FF]{2}\s+', '', label).strip()
+    my_flag = get_panel_flag()
+    final_label = f"{my_flag} {clean_label}"
     
     # اگه کاربر از قبل هست، آپدیت کن
     variants = body.get("variants") or default_variants()
@@ -6268,7 +6274,7 @@ async def api_node_receive_user(request: Request):
     async with LINKS_LOCK:
         if uid in LINKS:
             # آپدیت
-            LINKS[uid]["label"] = label
+            LINKS[uid]["label"] = final_label
             LINKS[uid]["limit_bytes"] = limit_bytes
             LINKS[uid]["expires_at"] = expires_at
             LINKS[uid]["max_connections"] = max_connections
@@ -6278,7 +6284,7 @@ async def api_node_receive_user(request: Request):
         else:
             # ساخت جدید
             LINKS[uid] = {
-                "label": label,
+                "label": final_label, 
                 "limit_bytes": limit_bytes,
                 "used_bytes": 0,
                 "max_connections": max_connections,
