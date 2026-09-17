@@ -982,6 +982,7 @@ async def startup():
     asyncio.create_task(keep_alive())
     asyncio.create_task(github_check_loop())
     asyncio.create_task(node_health_check_loop())
+    asyncio.create_task(report_usage_to_master_loop())
     await restart_telegram_bot()
     asyncio.create_task(telegram_notifier_cron())
     await ensure_default_link()
@@ -3721,6 +3722,8 @@ from nodes import (
     delete_user_from_all_nodes,
     sync_user_to_all_nodes,
     reset_usage_on_all_nodes,
+    get_config_from_node, 
+    report_usage_to_master_loop,
 )
 
 # ── HTML Panel (Gold/Neon Theme) ─────────────────────────────────────────
@@ -4448,6 +4451,35 @@ body[dir="rtl"]{direction:rtl;text-align:right}
 
         <!-- API Token -->
         <div class="fg" id="prole-token-section">
+                <!-- Master Settings (فقط وقتی Node انتخاب شده) -->
+        <div class="fg" id="prole-master-section" style="display:none">
+          <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-top:8px">
+            <div style="font-weight:700;margin-bottom:10px;color:var(--gold)">🔗 اتصال به پنل Master</div>
+            
+            <div class="fg">
+              <label class="fl">Slot این پنل</label>
+              <select class="fs" id="prole-slot">
+                <option value="1">1 - 🇺🇸 America</option>
+                <option value="2">2 - 🇸🇬 Singapore</option>
+                <option value="3">3 - 🇳🇱 Netherlands</option>
+                <option value="4">4 - 🇫🇮 Finland</option>
+                <option value="5">5 - 🌐 Variable</option>
+              </select>
+              <div style="font-size:10px;color:var(--text3);margin-top:4px">توی پنل Master، توی کدوم اسلات قرار داری؟</div>
+            </div>
+            
+            <div class="fg">
+              <label class="fl">آدرس پنل Master</label>
+              <input class="fi" type="text" id="prole-master-url" placeholder="https://hl-panel.up.railway.app" style="font-family:monospace;font-size:12px">
+            </div>
+            
+            <div class="fg">
+              <label class="fl">توکن Master</label>
+              <input class="fi" type="text" id="prole-master-token" placeholder="nd_xxxxxxxxxxxxxxxxx" style="font-family:monospace;font-size:12px">
+              <div style="font-size:10px;color:var(--text3);margin-top:4px">از پنل Master → تنظیمات → نقش پنل → کپی توکن</div>
+            </div>
+          </div>
+        </div>
           <label class="fl" data-en="API Token (for Master to connect)" data-fa="توکن API (برای اتصال مستر)">توکن API (برای اتصال مستر)</label>
           <div style="display:flex;gap:8px;align-items:stretch">
             <input class="fi" type="text" id="prole-token" readonly style="flex:1;font-family:monospace;font-size:11px;background:var(--surface3)">
@@ -5575,6 +5607,11 @@ async function loadPanelRole(){
     
     $m('prole-token').value = d.my_api_token || '';
     
+    // ⭐ فیلدهای Master
+    if($m('prole-slot')) $m('prole-slot').value = d.panel_slot || 1;
+    if($m('prole-master-url')) $m('prole-master-url').value = d.master_url || '';
+    if($m('prole-master-token')) $m('prole-master-token').value = d.master_token || '';
+    
     toggleTokenSection(d.panel_role);
     
     $m('prole-status').textContent = d.panel_role === 'master' ? '🔑 Master' : '🖥️ Node';
@@ -5604,11 +5641,14 @@ async function loadCountriesList(){
 
 function toggleTokenSection(role){
   const tokenSection = $m('prole-token-section');
+  const masterSection = $m('prole-master-section');
   if(!tokenSection) return;
   if(role === 'slave'){
     tokenSection.style.display = '';
+    if(masterSection) masterSection.style.display = '';
   }else{
     tokenSection.style.display = 'none';
+    if(masterSection) masterSection.style.display = 'none';
   }
 }
 
@@ -5622,6 +5662,9 @@ async function savePanelRole(){
   const role = document.querySelector('input[name="panel_role"]:checked')?.value || 'master';
   const name = $m('prole-name').value.trim();
   const country = $m('prole-country').value;
+  const slot = parseInt($m('prole-slot')?.value || '1');
+  const masterUrl = ($m('prole-master-url')?.value || '').trim();
+  const masterToken = ($m('prole-master-token')?.value || '').trim();
   
   if(!name){
     toast('نام پنل الزامی است', true);
@@ -5642,6 +5685,9 @@ async function savePanelRole(){
         panel_role: role,
         panel_name: name,
         panel_country: country,
+        panel_slot: slot,
+        master_url: masterUrl,
+        master_token: masterToken,
       })
     });
     
