@@ -431,3 +431,40 @@ async def reset_usage_on_all_nodes(uid: str) -> dict:
         except Exception as e:
             results[slot] = {"ok": False, "message": str(e)}
     return results
+
+async def get_config_from_node(slot: int, uid: str) -> str | None:
+    """
+    از یه نود می‌پرسه کانفیگ کاربر چیه.
+    
+    Returns:
+        کانفیگ (vless://... یا trojan://...) یا None اگه نود آفلاین/خطا بود
+    """
+    node = get_node_by_slot(slot)
+    if not node:
+        return None
+    
+    address = (node.get("address") or "").strip()
+    token = (node.get("api_token") or "").strip()
+    if not address or not token:
+        return None
+    
+    if not address.startswith("http"):
+        address = "https://" + address
+    address = address.rstrip("/")
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            r = await client.get(
+                f"{address}/api/node/get-config",
+                headers={"X-Node-Token": token},
+                params={"uuid": uid},
+            )
+            if r.status_code == 200:
+                data = r.json()
+                return data.get("config")
+            else:
+                logger.warning(f"[NODE] get-config from slot {slot} returned {r.status_code}")
+                return None
+    except Exception as e:
+        logger.warning(f"[NODE] get-config from slot {slot} failed: {e}")
+        return None
