@@ -353,3 +353,81 @@ async def node_health_check_loop():
         except Exception as e:
             logger.error(f"[NODE] Health check loop error: {e}")
         await asyncio.sleep(60)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# توابع اضافی برای sync تغییرات کاربر با نودها
+# ═══════════════════════════════════════════════════════════════════════
+
+async def delete_user_from_all_nodes(uid: str) -> dict:
+    """کاربر رو از همه نودهای فعال حذف می‌کنه."""
+    results = {}
+    for s in DEFAULT_SLOTS:
+        slot = s["slot"]
+        node = get_node_by_slot(slot)
+        if not node or not node.get("address"):
+            continue
+        
+        address = node["address"].rstrip("/")
+        if not address.startswith("http"):
+            address = "https://" + address
+        
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                r = await client.post(
+                    f"{address}/api/node/delete-user",
+                    headers={
+                        "X-Node-Token": node["api_token"],
+                        "Content-Type": "application/json",
+                    },
+                    json={"uuid": uid},
+                )
+                results[slot] = {"ok": r.status_code == 200}
+                if r.status_code == 200:
+                    logger.info(f"[NODE] User {uid[:8]} deleted from slot {slot} ✅")
+        except Exception as e:
+            results[slot] = {"ok": False, "message": str(e)}
+            logger.warning(f"[NODE] Delete from slot {slot} failed: {e}")
+    return results
+
+
+async def sync_user_to_all_nodes(user_data: dict) -> dict:
+    """اطلاعات کاربر رو روی همه نودها sync می‌کنه."""
+    results = {}
+    for s in DEFAULT_SLOTS:
+        slot = s["slot"]
+        node = get_node_by_slot(slot)
+        if not node or not node.get("address"):
+            continue
+        result = await push_user_to_node(slot, user_data)
+        results[slot] = result
+    return results
+
+
+async def reset_usage_on_all_nodes(uid: str) -> dict:
+    """مصرف کاربر رو روی همه نودها صفر می‌کنه."""
+    results = {}
+    for s in DEFAULT_SLOTS:
+        slot = s["slot"]
+        node = get_node_by_slot(slot)
+        if not node or not node.get("address"):
+            continue
+        
+        address = node["address"].rstrip("/")
+        if not address.startswith("http"):
+            address = "https://" + address
+        
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                r = await client.post(
+                    f"{address}/api/node/reset-usage",
+                    headers={
+                        "X-Node-Token": node["api_token"],
+                        "Content-Type": "application/json",
+                    },
+                    json={"uuid": uid},
+                )
+                results[slot] = {"ok": r.status_code == 200}
+        except Exception as e:
+            results[slot] = {"ok": False, "message": str(e)}
+    return results
