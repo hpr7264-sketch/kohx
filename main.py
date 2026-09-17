@@ -838,6 +838,7 @@ async def save_db():
                 "railway_token", "notify_connections",
                 "panel_role", "panel_name", "panel_country", "panel_flag",
                 "my_api_token", "master_url", "master_token",
+                "panel_slot",
             )
             for key in settings_keys:
                 conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, CONFIG.get(key, "")))
@@ -6410,6 +6411,9 @@ async def api_get_panel_role(_=Depends(require_auth)):
         "panel_country": CONFIG.get("panel_country", "nl"),
         "panel_flag": CONFIG.get("panel_flag", "🇳🇱"),
         "my_api_token": CONFIG.get("my_api_token", ""),
+        "panel_slot": int(CONFIG.get("panel_slot", 1)),
+        "master_url": CONFIG.get("master_url", ""),
+        "master_token": CONFIG.get("master_token", ""),
     }
 
 
@@ -6438,6 +6442,18 @@ async def api_set_panel_role(request: Request, _=Depends(require_auth)):
     CONFIG["panel_country"] = country
     CONFIG["panel_flag"] = flag
     
+    # ⭐ فیلدهای Master
+    if "panel_slot" in body:
+        slot = int(body.get("panel_slot") or 1)
+        if slot < 1 or slot > MAX_NODES:
+            raise HTTPException(status_code=400, detail=f"Slot must be between 1 and {MAX_NODES}")
+        CONFIG["panel_slot"] = slot
+    
+    if "master_url" in body:
+        CONFIG["master_url"] = str(body.get("master_url") or "").strip()
+    if "master_token" in body:
+        CONFIG["master_token"] = str(body.get("master_token") or "").strip()
+    
     # ذخیره توی دیتابیس
     await save_db()
     
@@ -6450,7 +6466,6 @@ async def api_set_panel_role(request: Request, _=Depends(require_auth)):
         "panel_country": country,
         "panel_flag": flag,
     }
-
 
 @app.post("/api/panel/regenerate-token")
 async def api_regenerate_token(_=Depends(require_auth)):
