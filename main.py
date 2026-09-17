@@ -355,6 +355,102 @@ def variants_from_body(body: dict, base: dict | None = None) -> dict:
         result[auth] = cur
     return sanitize_variants(result)
 
+    # ═══════════════════════════════════════════════════════════════════════
+# 🌐 NODE SYSTEM — لیست کشورها + توابع پایه
+# ═══════════════════════════════════════════════════════════════════════
+
+COUNTRIES = {
+    "nl": {"name": "Netherlands",   "flag": "🇳🇱"},
+    "us": {"name": "United States", "flag": "🇺🇸"},
+    "sg": {"name": "Singapore",     "flag": "🇸🇬"},
+    "fi": {"name": "Finland",       "flag": "🇫🇮"},
+    "de": {"name": "Germany",       "flag": "🇩🇪"},
+    "jp": {"name": "Japan",         "flag": "🇯🇵"},
+    "gb": {"name": "United Kingdom","flag": "🇬🇧"},
+    "fr": {"name": "France",        "flag": "🇫🇷"},
+    "tr": {"name": "Turkey",        "flag": "🇹🇷"},
+    "ae": {"name": "UAE",           "flag": "🇦🇪"},
+    "ca": {"name": "Canada",        "flag": "🇨🇦"},
+    "au": {"name": "Australia",     "flag": "🇦🇺"},
+    "it": {"name": "Italy",         "flag": "🇮🇹"},
+    "es": {"name": "Spain",         "flag": "🇪🇸"},
+    "se": {"name": "Sweden",        "flag": "🇸🇪"},
+    "ch": {"name": "Switzerland",   "flag": "🇨🇭"},
+    "at": {"name": "Austria",       "flag": "🇦🇹"},
+    "pl": {"name": "Poland",        "flag": "🇵🇱"},
+    "ru": {"name": "Russia",        "flag": "🇷🇺"},
+    "in": {"name": "India",         "flag": "🇮🇳"},
+    "kr": {"name": "South Korea",   "flag": "🇰🇷"},
+    "hk": {"name": "Hong Kong",     "flag": "🇭🇰"},
+    "ir": {"name": "Iran",          "flag": "🇮🇷"},
+    "br": {"name": "Brazil",        "flag": "🇧🇷"},
+}
+
+MAX_NODES = 5
+
+NODE_SETTINGS_KEYS = (
+    "panel_role",
+    "panel_name",
+    "panel_country",
+    "panel_flag",
+    "my_api_token",
+    "master_url",
+    "master_token",
+)
+
+
+def generate_node_token() -> str:
+    """توکن امن برای احراز هویت بین مستر و نودها تولید می‌کنه."""
+    return "nd_" + secrets.token_urlsafe(32)
+
+
+def get_panel_role() -> str:
+    """نقش این پنل رو برمی‌گردونه: 'master' یا 'slave'."""
+    return CONFIG.get("panel_role", "master")
+
+
+def get_panel_flag() -> str:
+    """پرچم این پنل رو برمی‌گردونه."""
+    return CONFIG.get("panel_flag", "🇳🇱")
+
+
+def get_panel_name() -> str:
+    """نام این پنل رو برمی‌گردونه."""
+    return CONFIG.get("panel_name", "Master")
+
+
+def init_node_settings():
+    """اگه تنظیمات نود وجود نداشته باشه، مقدار پیش‌فرض می‌ذاره."""
+    conn = get_db()
+    try:
+        existing = set()
+        cur = conn.execute("SELECT key FROM settings")
+        for row in cur.fetchall():
+            existing.add(row["key"])
+        
+        defaults = {
+            "panel_role": "master",
+            "panel_name": "Master-Panel",
+            "panel_country": "nl",
+            "panel_flag": "🇳🇱",
+            "my_api_token": generate_node_token(),
+            "master_url": "",
+            "master_token": "",
+        }
+        
+        for key, val in defaults.items():
+            if key not in existing:
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?)",
+                    (key, val)
+                )
+                CONFIG[key] = val
+                logger.info(f"[NODE] Initialized setting '{key}'")
+        
+        conn.commit()
+    finally:
+        conn.close()
+
 DB_FILE = "/data/panel.db" if os.path.isdir("/data") else "panel.db"
 if os.path.isdir("/data"):
     logger.warning(f"[STARTUP] Persistent volume detected at /data -> using {DB_FILE} (data survives restarts/deploys)")
@@ -615,6 +711,28 @@ def init_db():
             latest_url TEXT,
             checked_at REAL
         );
+        CREATE TABLE IF NOT EXISTS nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slot INTEGER UNIQUE CHECK(slot BETWEEN 1 AND 5),
+            name TEXT NOT NULL,
+            country_code TEXT NOT NULL,
+            flag TEXT NOT NULL,
+            address TEXT NOT NULL,
+            api_token TEXT NOT NULL,
+            status TEXT DEFAULT 'unknown',
+            enabled INTEGER DEFAULT 1,
+            last_check REAL,
+            last_stats_json TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS node_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT NOT NULL,
+            node_slot INTEGER NOT NULL,
+            used_bytes INTEGER DEFAULT 0,
+            last_report REAL,
+            UNIQUE(uuid, node_slot)
+        );
     """)
     conn.commit()
     # Migrate older DBs created before protocol/fingerprint/alpn/port existed
@@ -715,7 +833,13 @@ async def save_db():
                 for addr in CUSTOM_ADDRESSES:
                     conn.execute("INSERT INTO custom_addresses (address) VALUES (?)", (addr,))
             # Save settings
-            for key in ("telegram_token", "telegram_admin_id", "bot_lang", "railway_token", "notify_connections"):
+            settings_keys = (
+                "telegram_token", "telegram_admin_id", "bot_lang", 
+                "railway_token", "notify_connections",
+                "panel_role", "panel_name", "panel_country", "panel_flag",
+                "my_api_token", "master_url", "master_token",
+            )
+            for key in settings_keys:
                 conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, CONFIG.get(key, "")))
             conn.commit()
     except Exception as e:
@@ -849,12 +973,15 @@ async def startup():
     global http_client
     init_db()
     load_db()
+    init_node_settings()
+    init_default_slots()
     migrate_legacy_uuids()
     limits = httpx.Limits(max_connections=500, max_keepalive_connections=100)
     timeout = httpx.Timeout(30.0, connect=10.0)
     http_client = httpx.AsyncClient(limits=limits, timeout=timeout, follow_redirects=True)
     asyncio.create_task(keep_alive())
     asyncio.create_task(github_check_loop())
+    asyncio.create_task(node_health_check_loop())
     await restart_telegram_bot()
     asyncio.create_task(telegram_notifier_cron())
     await ensure_default_link()
@@ -866,12 +993,47 @@ async def shutdown():
     if http_client:
         await http_client.aclose()
 
-def get_domain() -> str:
-    return (
-        os.environ.get("RENDER_EXTERNAL_URL", os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost"))
-        .replace("https://", "").replace("http://", "")
-    )
+import contextvars
 
+_request_host_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "luffy_request_host", default=""
+)
+
+def _host_without_port(raw_host: str) -> str:
+    h = raw_host.strip()
+    if not h:
+        return ""
+    if h.startswith("["):
+        return h.split("]")[0].lstrip("[")
+    if h.count(":") == 1:
+        return h.split(":", 1)[0]
+    return h
+
+@app.middleware("http")
+async def _detect_public_host(request: Request, call_next):
+    raw_host = (
+        request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+        or request.headers.get("host", "")
+    )
+    host_only = _host_without_port(raw_host)
+    token = _request_host_ctx.set(host_only) if host_only else None
+    try:
+        return await call_next(request)
+    finally:
+        if token is not None:
+            _request_host_ctx.reset(token)
+
+def get_domain() -> str:
+    ctx_host = _request_host_ctx.get()
+    if ctx_host:
+        return ctx_host
+    return (
+        os.environ.get("RENDER_EXTERNAL_URL")
+        or os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+        or os.environ.get("PUBLIC_DOMAIN")
+        or "localhost"
+    ).replace("https://", "").replace("http://", "")
+    
 def generate_vless_link(
     uuid: str,
     remark: str = "エムエムディー",
@@ -3478,6 +3640,23 @@ async def websocket_tunnel(websocket: WebSocket, auth: str, uuid: str):
 # ══════════════════════════════════════════════════════════════════════════════
 from xhttp_transport import router as xhttp_router
 app.include_router(xhttp_router)
+# ═══════════════════════════════════════════════════════════════════════
+# Node System — فایل nodes.py رو import کن
+# ═══════════════════════════════════════════════════════════════════════
+from nodes import (
+    init_default_slots,
+    get_all_nodes,
+    get_node_by_slot,
+    update_node,
+    clear_node,
+    update_node_status,
+    test_node_connection,
+    test_all_nodes,
+    push_user_to_node,
+    push_user_to_all_nodes,
+    node_health_check_loop,
+    DEFAULT_SLOTS,
+)
 
 # ── HTML Panel (Gold/Neon Theme) ─────────────────────────────────────────
 PANEL_HTML = r"""<!DOCTYPE html>
@@ -3961,10 +4140,10 @@ body[dir="rtl"]{direction:rtl;text-align:right}
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
         <span class="nav-label" data-en="Clean IP" data-fa="آی‌پی تمیز">Clean IP</span>
       </button>
-      <button class="nav-item" data-page="notifications">
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
-        <span class="nav-label" data-en="Notifications" data-fa="اعلانات">Notifications</span>
-        <span class="nav-badge" id="notif-badge" style="display:none">0</span>
+      <button class="nav-item" data-page="nodes">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="6" rx="2"/><rect x="2" y="14" width="20" height="6" rx="2"/><circle cx="6" cy="7" r="1" fill="currentColor"/><circle cx="6" cy="17" r="1" fill="currentColor"/></svg>
+        <span class="nav-label" data-en="Nodes" data-fa="نودها">نودها</span>
+        <span class="nav-badge" id="nodes-badge" style="display:none">0</span>
       </button>
       <button class="nav-item" data-page="security">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
@@ -4103,20 +4282,19 @@ body[dir="rtl"]{direction:rtl;text-align:right}
       </div>
     </section>
 
-    <!-- Notifications -->
-    <section class="page" id="page-notifications">
+    <!-- Nodes -->
+    <section class="page" id="page-nodes">
       <div class="page-header">
-        <div><div class="page-title" data-en="Notifications" data-fa="اعلانات">Notifications</div><div class="page-sub" data-en="Updates, alerts & system messages" data-fa="بروزرسانی‌ها، هشدارها و پیام‌های سیستم">Updates, alerts & system messages</div></div>
-        <div style="display:flex;gap:6px">
-          <button class="btn btn-ghost btn-sm" onclick="markAllSeen()" data-en="Mark all read" data-fa="خوانده شدن همه">Mark all read</button>
-          <button class="btn btn-danger btn-sm" onclick="clearNotifs()" data-en="Clear all" data-fa="حذف همه">Clear all</button>
+        <div>
+          <div class="page-title" data-en="Nodes" data-fa="نودها">نودها</div>
+          <div class="page-sub" data-en="Manage up to 5 nodes (Master + Slaves)" data-fa="مدیریت حداکثر ۵ نود (مستر + نودها)">مدیریت حداکثر ۵ نود</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-ghost" onclick="testAllNodes()" data-en="🔍 Test All" data-fa="🔍 تست همه">🔍 تست همه</button>
         </div>
       </div>
-      <div class="card" style="padding:0;overflow:hidden">
-        <div id="notif-list" style="padding:4px 0">
-          <div class="empty" data-en="No notifications" data-fa="هیچ اعلانی وجود ندارد">No notifications</div>
-        </div>
-      </div>
+
+      <div id="nodes-list" style="display:flex;flex-direction:column;gap:12px"></div>
     </section>
 
     <!-- Clean IP -->
@@ -4162,6 +4340,66 @@ body[dir="rtl"]{direction:rtl;text-align:right}
     <section class="page" id="page-settings">
       <div class="page-header"><div><div class="page-title" data-en="Settings" data-fa="تنظیمات">Settings</div><div class="page-sub" data-en="Railway Permanent Database & Preferences" data-fa="دیتابیس دائمی Railway و تنظیمات">Railway Permanent Database & Preferences</div></div></div>
 
+        <!-- Panel Role & Node Settings -->
+      <div class="card" style="border:1px solid rgba(96,165,250,0.3);margin-bottom:14px">
+        <div class="card-hd">
+          <div class="card-title" style="color:var(--gold)">🌐 <span data-en="Panel Role & Node Settings" data-fa="نقش پنل و تنظیمات نود">نقش پنل و تنظیمات نود</span></div>
+          <span id="prole-status" style="font-size:11px;color:var(--text3)">-</span>
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:12px;line-height:1.6" data-en="Choose whether this panel acts as a Master (central) or as a Node (Slave). If Node, copy the API token and enter it in the Master panel." data-fa="انتخاب کنید که این پنل به عنوان Master (مرکزی) یا Node (نود) عمل کند. اگر نود، توکن API را کپی کرده و در پنل Master وارد کنید.">
+          انتخاب کنید که این پنل به عنوان Master (مرکزی) یا Node (نود) عمل کند. اگر نود، توکن API را کپی کرده و در پنل Master وارد کنید.
+        </div>
+
+        <!-- Role Selector -->
+        <div class="fg">
+          <label class="fl" data-en="Panel Role" data-fa="نقش پنل">نقش پنل</label>
+          <div style="display:flex;gap:10px;margin-top:6px">
+            <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-radius:10px;cursor:pointer;flex:1;transition:all .2s" id="prole-master-label">
+              <input type="radio" name="panel_role" value="master" id="prole-master" style="accent-color:var(--gold)">
+              <span style="font-weight:700">🔑 Master</span>
+              <span style="font-size:10px;color:var(--text3)" data-en="(Central)" data-fa="(مرکزی)">(مرکزی)</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-radius:10px;cursor:pointer;flex:1;transition:all .2s" id="prole-slave-label">
+              <input type="radio" name="panel_role" value="slave" id="prole-slave" style="accent-color:var(--gold)">
+              <span style="font-weight:700">🖥️ Node</span>
+              <span style="font-size:10px;color:var(--text3)" data-en="(Slave)" data-fa="(نود)">(نود)</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Panel Name -->
+        <div class="fg">
+          <label class="fl" data-en="Panel Name" data-fa="نام پنل">نام پنل</label>
+          <input class="fi" type="text" id="prole-name" placeholder="e.g. Netherlands-1">
+        </div>
+
+        <!-- Panel Country -->
+        <div class="fg">
+          <label class="fl" data-en="Country / Flag" data-fa="کشور / پرچم">کشور / پرچم</label>
+          <select class="fs" id="prole-country">
+            <option value="">Loading countries...</option>
+          </select>
+        </div>
+
+        <!-- API Token -->
+        <div class="fg" id="prole-token-section">
+          <label class="fl" data-en="API Token (for Master to connect)" data-fa="توکن API (برای اتصال مستر)">توکن API (برای اتصال مستر)</label>
+          <div style="display:flex;gap:8px;align-items:stretch">
+            <input class="fi" type="text" id="prole-token" readonly style="flex:1;font-family:monospace;font-size:11px;background:var(--surface3)">
+            <button class="btn btn-ghost btn-sm" onclick="copyPanelToken()" id="prole-copy-btn" style="white-space:nowrap">📋 <span data-en="Copy" data-fa="کپی">کپی</span></button>
+            <button class="btn btn-danger btn-sm" onclick="regeneratePanelToken()" id="prole-regen-btn" style="white-space:nowrap">🔄 <span data-en="Regen" data-fa="جدید">جدید</span></button>
+          </div>
+          <div style="font-size:10px;color:var(--red);margin-top:6px;line-height:1.5" data-en="⚠️ Keep this token secret. Only share it with your Master panel." data-fa="⚠️ این توکن رو مخفی نگه دار. فقط با پنل Master به اشتراک بذار.">
+            ⚠️ این توکن رو مخفی نگه دار. فقط با پنل Master به اشتراک بذار.
+          </div>
+        </div>
+
+        <!-- Save Button -->
+        <button class="btn btn-gold" onclick="savePanelRole()" style="width:100%;justify-content:center;margin-top:8px" id="prole-save-btn">
+          💾 <span data-en="Save Panel Settings" data-fa="ذخیره تنظیمات پنل">ذخیره تنظیمات پنل</span>
+        </button>
+      </div>
+   
       <!-- Permanent Database -->
       <div class="card" style="border:1px solid rgba(129,140,248,0.25)">
         <div class="card-hd">
@@ -4422,6 +4660,44 @@ body[dir="rtl"]{direction:rtl;text-align:right}
     <button class="btn btn-gold" onclick="addAddrs()" style="width:100%;justify-content:center;margin-top:12px;padding:12px" data-en="ADD ALL" data-fa="افزودن همه">ADD ALL</button>
   </div>
 </div>
+<div class="mo" id="mo-node" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="mo-box">
+    <button class="mo-close" onclick="document.getElementById('mo-node').classList.remove('show')">✕</button>
+    <div class="mo-title" id="mo-node-title">ADD NODE</div>
+
+    <input type="hidden" id="node-slot">
+
+    <div class="fg" style="margin-bottom:14px">
+      <div id="node-slot-info" style="padding:12px 14px;background:var(--surface3);border:1px solid var(--border);border-radius:10px;font-size:13px;text-align:center">
+        <!-- اطلاعات اسلات اینجا نمایش داده می‌شه -->
+      </div>
+    </div>
+
+    <div class="fg">
+      <label class="fl" data-en="Node Name" data-fa="نام نود">نام نود</label>
+      <input class="fi" type="text" id="node-name" placeholder="e.g. USA-1">
+    </div>
+
+    <div class="fg">
+      <label class="fl" data-en="Panel Address" data-fa="آدرس پنل">آدرس پنل</label>
+      <input class="fi" type="text" id="node-address" placeholder="https://usa-panel.up.railway.app" style="font-family:monospace;font-size:12px">
+      <div style="font-size:10px;color:var(--text3);margin-top:4px" data-en="Full URL of the node panel (with https://)" data-fa="آدرس کامل پنل نود (با https://)">آدرس کامل پنل نود (با https://)</div>
+    </div>
+
+    <div class="fg">
+      <label class="fl" data-en="API Token" data-fa="توکن API">توکن API</label>
+      <input class="fi" type="text" id="node-token" placeholder="nd_xxxxxxxxxxxxxxxxxxx" style="font-family:monospace;font-size:12px">
+      <div style="font-size:10px;color:var(--text3);margin-top:4px" data-en="Get this from the node panel's Settings → Panel Role → Copy Token" data-fa="از پنل نود → تنظیمات → نقش پنل → کپی توکن بگیر">از پنل نود: تنظیمات → نقش پنل → کپی توکن</div>
+    </div>
+
+    <div id="node-test-result" style="display:none;padding:10px 12px;border-radius:8px;font-size:12px;margin-bottom:10px"></div>
+
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="btn btn-gold" onclick="saveNode()" style="flex:1;justify-content:center;padding:12px" id="node-save-btn" data-en="SAVE" data-fa="ذخیره">ذخیره</button>
+      <button class="btn btn-ghost" onclick="document.getElementById('mo-node').classList.remove('show')" style="padding:12px" data-en="Cancel" data-fa="انصراف">انصراف</button>
+    </div>
+  </div>
+</div>
 
 <script>
 function $(s){return document.querySelector(s)}
@@ -4535,6 +4811,8 @@ function showDashboard(){
   loadLinks();
   loadAddrs();
   loadSettings();
+  loadPanelRole();
+  loadNodes();      
   loadNotifs();
   updateNotifBadge();
   connectLogsWS();
@@ -4925,6 +5203,436 @@ async function saveAllSettings(){
     if(r.ok)toast('All settings saved');
     else toast('Failed to save settings',true);
   }catch(e){toast('Error saving settings',true)}
+}
+
+// ── Node Management ─────────────────────────────────────────────────────
+
+async function loadNodes(){
+  try{
+    const r = await fetch('/api/nodes');
+    if(!r.ok){
+      console.error('Failed to load nodes:', r.status);
+      return;
+    }
+    const d = await r.json();
+    renderNodesList(d.nodes || []);
+    
+    // آپدیت badge
+    const usedCount = (d.nodes || []).filter(n => n.address).length;
+    const badge = $m('nodes-badge');
+    if(badge){
+      if(usedCount > 0){
+        badge.style.display = '';
+        badge.textContent = usedCount + '/5';
+      }else{
+        badge.style.display = 'none';
+      }
+    }
+  }catch(e){
+    console.error('Error loading nodes:', e);
+  }
+}
+
+function renderNodesList(nodes){
+  const el = $m('nodes-list');
+  if(!el) return;
+  
+  if(!nodes || !nodes.length){
+    el.innerHTML = '<div class="empty">' + (lang === 'fa' ? 'هیچ نودی یافت نشد' : 'No nodes found') + '</div>';
+    return;
+  }
+  
+  el.innerHTML = nodes.map(n => {
+    const isEmpty = !n.address;
+    const statusColor = {
+      'online': 'var(--green)',
+      'offline': 'var(--red)',
+      'error': 'var(--red)',
+      'empty': 'var(--text3)',
+      'unknown': 'var(--yellow)',
+    }[n.status] || 'var(--text3)';
+    
+    const statusIcon = {
+      'online': '🟢',
+      'offline': '🔴',
+      'error': '⚠️',
+      'empty': '⚪',
+      'unknown': '🟡',
+    }[n.status] || '⚪';
+    
+    const statusText = {
+      'online': lang === 'fa' ? 'آنلاین' : 'Online',
+      'offline': lang === 'fa' ? 'آفلاین' : 'Offline',
+      'error': lang === 'fa' ? 'خطا' : 'Error',
+      'empty': lang === 'fa' ? 'خالی' : 'Empty',
+      'unknown': lang === 'fa' ? 'نامشخص' : 'Unknown',
+    }[n.status] || 'Unknown';
+    
+    if(isEmpty){
+      // کارت خالی
+      return `
+        <div class="card" style="margin:0;padding:16px;border:1px dashed var(--border)">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <div style="font-size:24px;font-weight:800;color:var(--text3);width:36px;text-align:center">${n.slot}</div>
+            <div style="font-size:28px">${n.flag}</div>
+            <div style="flex:1;min-width:120px">
+              <div style="font-weight:700;font-size:14px">${esc(n.name)}</div>
+              <div style="font-size:11px;color:var(--text3);margin-top:2px">${lang === 'fa' ? 'اسلات خالی' : 'Empty slot'}</div>
+            </div>
+            <button class="btn btn-gold" onclick="showAddNodeMo(${n.slot})">
+              ➕ ${lang === 'fa' ? 'افزودن نود' : 'Add Node'}
+            </button>
+          </div>
+        </div>
+      `;
+    }
+    
+    // کارت پر
+    return `
+      <div class="card" style="margin:0;padding:16px;border:1px solid var(--border2)">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px">
+          <div style="font-size:24px;font-weight:800;color:var(--text3);width:36px;text-align:center">${n.slot}</div>
+          <div style="font-size:28px">${n.flag}</div>
+          <div style="flex:1;min-width:140px">
+            <div style="font-weight:700;font-size:14px">${esc(n.name)}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr;text-align:left">${esc(n.address)}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:20px;background:${statusColor}22;border:1px solid ${statusColor}66">
+            <span style="font-size:14px">${statusIcon}</span>
+            <span style="font-size:12px;font-weight:700;color:${statusColor}">${statusText}</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="act-btn act-edit" onclick="showAddNodeMo(${n.slot}, true)">✏️ ${tr('edit')}</button>
+          <button class="act-btn act-copy" onclick="testNode(${n.slot})">🔍 ${lang === 'fa' ? 'تست' : 'Test'}</button>
+          <button class="act-btn act-del" onclick="removeNode(${n.slot})">🗑️ ${tr('del')}</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function showAddNodeMo(slot, isEdit){
+  // لود کردن اطلاعات اسلات
+  try{
+    const r = await fetch('/api/nodes');
+    if(!r.ok) throw new Error('Failed to load');
+    const d = await r.json();
+    const node = (d.nodes || []).find(n => n.slot === slot);
+    if(!node) throw new Error('Slot not found');
+    
+    // تنظیم مودال
+    $m('node-slot').value = slot;
+    $m('mo-node-title').textContent = isEdit 
+      ? (lang === 'fa' ? `ویرایش نود اسلات ${slot}` : `Edit node slot ${slot}`)
+      : (lang === 'fa' ? `افزودن نود به اسلات ${slot}` : `Add node to slot ${slot}`);
+    
+    // نمایش اطلاعات اسلات
+    $m('node-slot-info').innerHTML = `
+      <div style="font-size:32px;margin-bottom:4px">${node.flag}</div>
+      <div style="font-weight:700">${esc(node.name)}</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:2px">${lang === 'fa' ? 'اسلات' : 'Slot'} #${slot}</div>
+    `;
+    
+    // پر کردن فیلدها
+    $m('node-name').value = node.address ? node.name : '';
+    $m('node-address').value = node.address || '';
+    $m('node-token').value = '';
+    
+    // مخفی کردن نتیجه تست
+    $m('node-test-result').style.display = 'none';
+    
+    // نمایش مودال
+    $m('mo-node').classList.add('show');
+  }catch(e){
+    toast(e.message || 'Error', true);
+  }
+}
+
+async function saveNode(){
+  const slot = parseInt($m('node-slot').value);
+  const name = $m('node-name').value.trim();
+  const address = $m('node-address').value.trim();
+  const token = $m('node-token').value.trim();
+  
+  if(!name){
+    toast(lang === 'fa' ? 'نام نود الزامی است' : 'Node name is required', true);
+    return;
+  }
+  if(!address){
+    toast(lang === 'fa' ? 'آدرس پنل الزامی است' : 'Panel address is required', true);
+    return;
+  }
+  if(!token){
+    toast(lang === 'fa' ? 'توکن API الزامی است' : 'API token is required', true);
+    return;
+  }
+  
+  $m('node-save-btn').disabled = true;
+  $m('node-save-btn').textContent = lang === 'fa' ? 'در حال ذخیره...' : 'Saving...';
+  
+  try{
+    const r = await fetch('/api/nodes', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        slot: slot,
+        name: name,
+        address: address,
+        api_token: token,
+      })
+    });
+    
+    if(!r.ok){
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || 'Error');
+    }
+    
+    const d = await r.json();
+    
+    // نمایش نتیجه تست
+    const test = d.test || {};
+    const resultEl = $m('node-test-result');
+    resultEl.style.display = '';
+    
+    if(test.ok){
+      resultEl.style.background = 'var(--green-dim)';
+      resultEl.style.color = 'var(--green)';
+      resultEl.style.border = '1px solid rgba(74,222,128,0.3)';
+      resultEl.textContent = `✅ ${lang === 'fa' ? 'اتصال موفق!' : 'Connected!'}`;
+    }else{
+      resultEl.style.background = 'var(--red-dim)';
+      resultEl.style.color = 'var(--red)';
+      resultEl.style.border = '1px solid rgba(248,113,113,0.3)';
+      resultEl.textContent = `❌ ${test.message || (lang === 'fa' ? 'اتصال ناموفق' : 'Connection failed')}`;
+    }
+    
+    // آپدیت لیست
+    await loadNodes();
+    
+    // بستن مودال بعد از ۱ ثانیه
+    setTimeout(() => {
+      $m('mo-node').classList.remove('show');
+    }, 1200);
+    
+    if(test.ok){
+      toast(lang === 'fa' ? '✅ نود با موفقیت اضافه شد' : '✅ Node added successfully');
+    }else{
+      toast(lang === 'fa' ? '⚠️ نود ذخیره شد ولی اتصال برقرار نشد' : '⚠️ Node saved but connection failed', true);
+    }
+    
+  }catch(e){
+    toast(e.message || 'Error', true);
+  }finally{
+    $m('node-save-btn').disabled = false;
+    $m('node-save-btn').textContent = lang === 'fa' ? 'ذخیره' : 'Save';
+  }
+}
+
+async function testNode(slot){
+  try{
+    toast(lang === 'fa' ? 'در حال تست...' : 'Testing...');
+    const r = await fetch(`/api/nodes/${slot}/test`, {method: 'POST'});
+    if(!r.ok) throw new Error('Test failed');
+    const d = await r.json();
+    
+    if(d.ok){
+      toast(`✅ ${d.message || 'OK'}`);
+    }else{
+      toast(`❌ ${d.message || 'Failed'}`, true);
+    }
+    
+    // آپدیت لیست
+    await loadNodes();
+  }catch(e){
+    toast(e.message || 'Error', true);
+  }
+}
+
+async function testAllNodes(){
+  try{
+    toast(lang === 'fa' ? 'در حال تست همه نودها...' : 'Testing all nodes...');
+    const r = await fetch('/api/nodes/test-all', {method: 'POST'});
+    if(!r.ok) throw new Error('Test failed');
+    const d = await r.json();
+    
+    const online = (d.results || []).filter(x => x.ok).length;
+    const total = (d.results || []).length;
+    
+    toast(`✅ ${online}/${total} ${lang === 'fa' ? 'نود آنلاین' : 'nodes online'}`);
+    await loadNodes();
+  }catch(e){
+    toast(e.message || 'Error', true);
+  }
+}
+
+async function removeNode(slot){
+  if(!confirm(lang === 'fa' ? 'حذف این نود؟' : 'Remove this node?')) return;
+  
+  try{
+    const r = await fetch(`/api/nodes/${slot}`, {method: 'DELETE'});
+    if(!r.ok) throw new Error('Delete failed');
+    toast(lang === 'fa' ? '✅ نود حذف شد' : '✅ Node removed');
+    await loadNodes();
+  }catch(e){
+    toast(e.message || 'Error', true);
+  }
+}
+
+// وقتی کاربر روی صفحه Nodes کلیک می‌کنه
+const originalSwitchPage = switchPage;
+switchPage = function(id){
+  originalSwitchPage(id);
+  if(id === 'nodes'){
+    loadNodes();
+  }
+};
+
+// ── Panel Role & Node Settings ─────────────────────────────────────────
+let panelCountries = [];
+
+async function loadPanelRole(){
+  try{
+    const r = await fetch('/api/panel/role');
+    if(!r.ok) return;
+    const d = await r.json();
+    
+    if(d.panel_role === 'slave'){
+      $m('prole-slave').checked = true;
+    }else{
+      $m('prole-master').checked = true;
+    }
+    
+    $m('prole-name').value = d.panel_name || '';
+    
+    await loadCountriesList();
+    $m('prole-country').value = d.panel_country || 'nl';
+    
+    $m('prole-token').value = d.my_api_token || '';
+    
+    toggleTokenSection(d.panel_role);
+    
+    $m('prole-status').textContent = d.panel_role === 'master' ? '🔑 Master' : '🖥️ Node';
+    $m('prole-status').style.color = d.panel_role === 'master' ? 'var(--gold)' : 'var(--green)';
+    
+  }catch(e){
+    console.error('Error loading panel role:', e);
+  }
+}
+
+async function loadCountriesList(){
+  if(panelCountries.length > 0) return;
+  try{
+    const r = await fetch('/api/countries');
+    if(!r.ok) return;
+    const d = await r.json();
+    panelCountries = d.countries || [];
+    
+    const sel = $m('prole-country');
+    sel.innerHTML = panelCountries.map(c => 
+      `<option value="${c.code}">${c.flag} ${c.name}</option>`
+    ).join('');
+  }catch(e){
+    console.error('Error loading countries:', e);
+  }
+}
+
+function toggleTokenSection(role){
+  const tokenSection = $m('prole-token-section');
+  if(!tokenSection) return;
+  if(role === 'slave'){
+    tokenSection.style.display = '';
+  }else{
+    tokenSection.style.display = 'none';
+  }
+}
+
+document.addEventListener('change', function(e){
+  if(e.target.name === 'panel_role'){
+    toggleTokenSection(e.target.value);
+  }
+});
+
+async function savePanelRole(){
+  const role = document.querySelector('input[name="panel_role"]:checked')?.value || 'master';
+  const name = $m('prole-name').value.trim();
+  const country = $m('prole-country').value;
+  
+  if(!name){
+    toast('نام پنل الزامی است', true);
+    return;
+  }
+  if(!country){
+    toast('کشور را انتخاب کنید', true);
+    return;
+  }
+  
+  $m('prole-save-btn').disabled = true;
+  
+  try{
+    const r = await fetch('/api/panel/role', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        panel_role: role,
+        panel_name: name,
+        panel_country: country,
+      })
+    });
+    
+    if(!r.ok){
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || 'Error');
+    }
+    
+    const d = await r.json();
+    toast(`✅ ذخیره شد: ${d.panel_flag} ${d.panel_name} (${role})`);
+    
+    $m('prole-status').textContent = role === 'master' ? '🔑 Master' : '🖥️ Node';
+    $m('prole-status').style.color = role === 'master' ? 'var(--gold)' : 'var(--green)';
+    
+  }catch(e){
+    toast(e.message || 'خطا در ذخیره', true);
+  }finally{
+    $m('prole-save-btn').disabled = false;
+  }
+}
+
+function copyPanelToken(){
+  const tok = $m('prole-token').value;
+  if(!tok){
+    toast('توکن موجود نیست', true);
+    return;
+  }
+  navigator.clipboard.writeText(tok).then(() => {
+    toast('✅ توکن کپی شد!');
+  }).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = tok;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    toast('✅ توکن کپی شد!');
+  });
+}
+
+async function regeneratePanelToken(){
+  if(!confirm('⚠️ توکن فعلی بی‌اعتبار می‌شه!\n\nاگه این پنل نود هست و مستر بهش وصله، باید توکن جدید رو توی مستر وارد کنی.\n\nادامه؟')) return;
+  
+  try{
+    const r = await fetch('/api/panel/regenerate-token', {method: 'POST'});
+    if(!r.ok) throw new Error('Error');
+    const d = await r.json();
+    
+    $m('prole-token').value = d.my_api_token;
+    toast('✅ توکن جدید تولید شد!');
+    
+  }catch(e){
+    toast('خطا در تولید توکن', true);
+  }
 }
 
 // ── Railway / Permanent Database ──────────────────────────────────────────
@@ -5359,5 +6067,304 @@ async def dashboard_page(request: Request):
 async def panel_page(request: Request):
     return HTMLResponse(content=PANEL_HTML)
 
+# ═══════════════════════════════════════════════════════════════════════
+# 🌐 NODE API — مدیریت نودها (روی مستر)
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.get("/api/nodes")
+async def api_list_nodes(_=Depends(require_auth)):
+    """لیست همه‌ی ۵ اسلات نود."""
+    nodes = get_all_nodes()
+    return {
+        "nodes": nodes,
+        "max_slots": MAX_NODES,
+        "used_slots": sum(1 for n in nodes if n.get("address")),
+    }
+
+
+@app.post("/api/nodes")
+async def api_add_node(request: Request, _=Depends(require_auth)):
+    """افزودن نود به یه اسلات."""
+    body = await request.json()
+    slot = int(body.get("slot") or 0)
+    name = str(body.get("name") or "").strip()
+    address = str(body.get("address") or "").strip()
+    token = str(body.get("api_token") or "").strip()
+    
+    # اعتبارسنجی
+    if slot < 1 or slot > MAX_NODES:
+        raise HTTPException(status_code=400, detail=f"Slot must be between 1 and {MAX_NODES}")
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    if not address:
+        raise HTTPException(status_code=400, detail="Address is required")
+    if not token:
+        raise HTTPException(status_code=400, detail="API token is required")
+    
+    # چک کن اسلات وجود داره
+    existing = get_node_by_slot(slot)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Slot {slot} not found")
+    
+    # ذخیره توی دیتابیس
+    ok = update_node(slot, name, address, token)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to update node")
+    
+    # تست اتصال خودکار
+    test_result = await test_node_connection(slot)
+    
+    logger.info(f"[NODE API] Node added to slot {slot}: {name}")
+    
+    return {
+        "ok": True,
+        "slot": slot,
+        "name": name,
+        "test": test_result,
+    }
+
+
+@app.delete("/api/nodes/{slot}")
+async def api_remove_node(slot: int, _=Depends(require_auth)):
+    """خالی کردن یه اسلات (پاک کردن اطلاعات نود)."""
+    if slot < 1 or slot > MAX_NODES:
+        raise HTTPException(status_code=400, detail="Invalid slot")
+    
+    node = get_node_by_slot(slot)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Slot {slot} not found")
+    
+    ok = clear_node(slot)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to clear node")
+    
+    logger.info(f"[NODE API] Slot {slot} cleared")
+    return {"ok": True, "slot": slot}
+
+
+@app.post("/api/nodes/{slot}/test")
+async def api_test_node(slot: int, _=Depends(require_auth)):
+    """تست اتصال با یه نود."""
+    if slot < 1 or slot > MAX_NODES:
+        raise HTTPException(status_code=400, detail="Invalid slot")
+    
+    result = await test_node_connection(slot)
+    return result
+
+
+@app.post("/api/nodes/test-all")
+async def api_test_all_nodes(_=Depends(require_auth)):
+    """تست همه‌ی نودها."""
+    results = await test_all_nodes()
+    return {"results": results}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🌐 NODE API — پاسخ به مستر (روی همه پنل‌ها فعاله)
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.get("/api/node/handshake")
+async def api_node_handshake(request: Request):
+    """پاسخ به تست اتصال از مستر.
+    
+    این endpoint روی همه‌ی پنل‌ها فعاله.
+    مستر با فرستادن توکن درخواست می‌ده و این پاسخ می‌ده.
+    """
+    # توکن رو از هدر بگیر
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    
+    if not my_token:
+        raise HTTPException(status_code=500, detail="This panel has no API token set")
+    if token != my_token:
+        logger.warning(f"[NODE] Handshake failed: invalid token from {get_request_ip(request)}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # پاسخ با اطلاعات پنل
+    async with connections_lock:
+        active_conns = len(connections)
+    
+    return {
+        "status": "ok",
+        "panel_name": get_panel_name(),
+        "panel_flag": get_panel_flag(),
+        "panel_role": get_panel_role(),
+        "version": PANEL_VERSION,
+        "stats": {
+            "users_count": len(LINKS),
+            "active_connections": active_conns,
+            "total_traffic_mb": round(stats["total_bytes"] / (1024 * 1024), 2),
+            "uptime": uptime(),
+        }
+    }
+
+
+@app.post("/api/node/receive-user")
+async def api_node_receive_user(request: Request):
+    """دریافت کاربر از مستر.
+    
+    وقتی مستر یه کاربر جدید می‌سازه، این endpoint روی همه نودها صدا زده
+    می‌شه تا کاربر رو اینجا هم بسازه.
+    """
+    # چک توکن
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        logger.warning(f"[NODE] receive-user: invalid token from {get_request_ip(request)}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    body = await request.json()
+    uid = body.get("uuid")
+    label = body.get("label")
+    
+    if not uid or not label:
+        raise HTTPException(status_code=400, detail="uuid and label are required")
+    
+    # اگه کاربر از قبل هست، آپدیت کن
+    variants = body.get("variants") or default_variants()
+    limit_bytes = int(body.get("limit_bytes") or 0)
+    expires_at = body.get("expires_at")
+    max_connections = int(body.get("max_connections") or 0)
+    
+    async with LINKS_LOCK:
+        if uid in LINKS:
+            # آپدیت
+            LINKS[uid]["label"] = label
+            LINKS[uid]["limit_bytes"] = limit_bytes
+            LINKS[uid]["expires_at"] = expires_at
+            LINKS[uid]["max_connections"] = max_connections
+            LINKS[uid]["variants"] = variants
+            logger.info(f"[NODE] Updated existing user '{label}' ({uid[:8]})")
+        else:
+            # ساخت جدید
+            LINKS[uid] = {
+                "label": label,
+                "limit_bytes": limit_bytes,
+                "used_bytes": 0,
+                "max_connections": max_connections,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "active": True,
+                "expires_at": expires_at,
+                "variants": variants,
+                "port": DEFAULT_PORT,
+                "external_config": "",
+            }
+            logger.info(f"[NODE] Received new user '{label}' ({uid[:8]}) from master")
+    
+    await save_db()
+    return {"status": "ok", "uuid": uid, "action": "created" if uid not in LINKS else "updated"}
+
+
+@app.get("/api/node/stats")
+async def api_node_stats(request: Request):
+    """آمار کامل یه نود (برای مستر)."""
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    async with connections_lock:
+        active_conns = len(connections)
+    
+    return {
+        "status": "ok",
+        "panel_name": get_panel_name(),
+        "panel_flag": get_panel_flag(),
+        "users_count": len(LINKS),
+        "active_connections": active_conns,
+        "total_traffic_mb": round(stats["total_bytes"] / (1024 * 1024), 2),
+        "uptime": uptime(),
+        "cpu_percent": psutil.cpu_percent(interval=0.1),
+        "memory_percent": psutil.virtual_memory().percent,
+    }
+    
+# ═══════════════════════════════════════════════════════════════════════
+# 🌐 PANEL ROLE API — مدیریت نقش پنل (Master/Slave)
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.get("/api/panel/role")
+async def api_get_panel_role(_=Depends(require_auth)):
+    """اطلاعات نقش این پنل رو برمی‌گردونه."""
+    return {
+        "panel_role": CONFIG.get("panel_role", "master"),
+        "panel_name": CONFIG.get("panel_name", "Master-Panel"),
+        "panel_country": CONFIG.get("panel_country", "nl"),
+        "panel_flag": CONFIG.get("panel_flag", "🇳🇱"),
+        "my_api_token": CONFIG.get("my_api_token", ""),
+    }
+
+
+@app.post("/api/panel/role")
+async def api_set_panel_role(request: Request, _=Depends(require_auth)):
+    """نقش پنل رو عوض می‌کنه (master/slave) + نام و کشور رو آپدیت می‌کنه."""
+    body = await request.json()
+    
+    role = str(body.get("panel_role") or "").strip().lower()
+    if role not in ("master", "slave"):
+        raise HTTPException(status_code=400, detail="Role must be 'master' or 'slave'")
+    
+    name = str(body.get("panel_name") or "").strip()[:50]
+    country = str(body.get("panel_country") or "").strip().lower()
+    
+    if not name:
+        raise HTTPException(status_code=400, detail="Panel name is required")
+    if country not in COUNTRIES:
+        raise HTTPException(status_code=400, detail=f"Invalid country code: {country}")
+    
+    flag = COUNTRIES[country]["flag"]
+    
+    # آپدیت CONFIG
+    CONFIG["panel_role"] = role
+    CONFIG["panel_name"] = name
+    CONFIG["panel_country"] = country
+    CONFIG["panel_flag"] = flag
+    
+    # ذخیره توی دیتابیس
+    await save_db()
+    
+    logger.info(f"[PANEL] Role updated: {role}, name: {name}, country: {country}")
+    
+    return {
+        "ok": True,
+        "panel_role": role,
+        "panel_name": name,
+        "panel_country": country,
+        "panel_flag": flag,
+    }
+
+
+@app.post("/api/panel/regenerate-token")
+async def api_regenerate_token(_=Depends(require_auth)):
+    """توکن API این پنل رو دوباره تولید می‌کنه.
+    
+    ⚠️ توجه: اگه این پنل slave باشه و مستر بهش وصل باشه،
+    باید توی مستر هم توکن جدید رو وارد کنی.
+    """
+    new_token = generate_node_token()
+    CONFIG["my_api_token"] = new_token
+    await save_db()
+    
+    logger.warning(f"[PANEL] API token regenerated. Old token is now invalid!")
+    
+    return {
+        "ok": True,
+        "my_api_token": new_token,
+        "warning": "Old token is now invalid. Update it in master panel if this is a slave.",
+    }
+
+
+@app.get("/api/countries")
+async def api_list_countries(_=Depends(require_auth)):
+    """لیست همه‌ی کشورهای موجود برای انتخاب."""
+    countries = []
+    for code, data in COUNTRIES.items():
+        countries.append({
+            "code": code,
+            "name": data["name"],
+            "flag": data["flag"],
+        })
+    return {"countries": countries}
+    
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=CONFIG["port"])
+    
